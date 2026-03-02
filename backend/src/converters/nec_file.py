@@ -6,7 +6,6 @@ Export: Generate .nec card deck from models (uses nec_input.build_card_deck)
 
 import ast
 import logging
-import re
 
 from src.models.antenna import Wire, Excitation, LumpedLoad, LoadType, TransmissionLine
 from src.models.ground import GroundConfig, GroundType
@@ -49,11 +48,12 @@ def _eval_numeric_expression(expr: str, symbols: dict[str, float]) -> float:
     Supported:
     - numeric literals (including forms like `.15` / `-.15`)
     - symbols defined by `SY` cards
-    - arithmetic operators: +, -, *, /, **
+    - arithmetic operators: +, -, *, /, ** (and `^` as alias for exponent)
     - parentheses
     """
+    expr_norm = expr.replace("^", "**")
     try:
-        node = ast.parse(expr, mode="eval")
+        node = ast.parse(expr_norm, mode="eval")
     except SyntaxError as e:
         raise ValueError(f"invalid expression '{expr}'") from e
 
@@ -62,8 +62,6 @@ def _eval_numeric_expression(expr: str, symbols: dict[str, float]) -> float:
             return _eval(node_obj.body)
         if isinstance(node_obj, ast.Constant):
             return _coerce_numeric_literal(node_obj.value, expr)
-        if isinstance(node_obj, ast.Num):  # pragma: no cover (py<3.8 compatibility path)
-            return _coerce_numeric_literal(node_obj.n, expr)
         if isinstance(node_obj, ast.Name):
             key = node_obj.id.upper()
             if key not in symbols:
@@ -88,7 +86,10 @@ def _eval_numeric_expression(expr: str, symbols: dict[str, float]) -> float:
             if isinstance(node_obj.op, ast.Div):
                 return left / right
             if isinstance(node_obj.op, ast.Pow):
-                return left ** right
+                result = left ** right
+                if isinstance(result, complex):
+                    raise ValueError(f"complex result is not supported in '{expr}'")
+                return result
             raise ValueError(f"unsupported binary operator in '{expr}'")
         raise ValueError(f"unsupported expression node '{type(node_obj).__name__}'")
 
@@ -119,7 +120,7 @@ def _parse_floats(
         if i < len(parts):
             try:
                 result.append(_parse_float_token(parts[i], symbols))
-            except (ValueError, ZeroDivisionError) as e:
+            except (ValueError, ZeroDivisionError, OverflowError) as e:
                 logger.warning("Failed to parse numeric token '%s' in line '%s': %s", parts[i], line, e)
                 result.append(0.0)
         else:
@@ -172,19 +173,24 @@ def parse_nec_file(content: str) -> NECFileData:
             body = line[2:].strip()
             if "'" in body:
                 body = body.split("'", 1)[0].strip()
-            if "=" not in body:
-                logger.warning("SY card missing '=': %s", line)
+            assignments = [item.strip() for item in body.split(",") if item.strip()]
+            if not assignments:
+                logger.warning("SY card missing assignments: %s", line)
                 continue
-            name_raw, expr_raw = body.split("=", 1)
-            name = name_raw.strip().upper()
-            expr = expr_raw.strip()
-            if not name:
-                logger.warning("SY card with empty symbol name: %s", line)
-                continue
-            try:
-                sy_symbols[name] = _parse_float_token(expr, sy_symbols)
-            except (ValueError, ZeroDivisionError) as e:
-                logger.warning("Failed to parse SY assignment '%s': %s", line, e)
+            for assignment in assignments:
+                if "=" not in assignment:
+                    logger.warning("SY assignment missing '=': %s", assignment)
+                    continue
+                name_raw, expr_raw = assignment.split("=", 1)
+                name = name_raw.strip().upper()
+                expr = expr_raw.strip()
+                if not name:
+                    logger.warning("SY assignment with empty symbol name: %s", assignment)
+                    continue
+                try:
+                    sy_symbols[name] = _parse_float_token(expr, sy_symbols)
+                except (ValueError, ZeroDivisionError, OverflowError) as e:
+                    logger.warning("Failed to parse SY assignment '%s': %s", assignment, e)
 
         elif card == "CE":
             # Comment end
@@ -229,7 +235,7 @@ def parse_nec_file(content: str) -> NECFileData:
                         dielectric_constant=eps_r,
                         conductivity=sigma,
                     )
-            except (ValueError, IndexError):
+            except (ValueError, IndexError, OverflowError):
                 pass
 
         elif card == "EX":
@@ -252,7 +258,7 @@ def parse_nec_file(content: str) -> NECFileData:
                         voltage_imag=v_imag,
                     )
                 )
-            except (ValueError, IndexError):
+            except (ValueError, IndexError, OverflowError):
                 pass
 
         elif card == "LD":
@@ -281,7 +287,7 @@ def parse_nec_file(content: str) -> NECFileData:
                             param3=p3,
                         )
                     )
-            except (ValueError, IndexError):
+            except (ValueError, IndexError, OverflowError):
                 pass
 
         elif card == "TL":
@@ -314,7 +320,7 @@ def parse_nec_file(content: str) -> NECFileData:
                         shunt_admittance_imag2=ya_i2,
                     )
                 )
-            except (ValueError, IndexError):
+            except (ValueError, IndexError, OverflowError):
                 pass
 
         elif card == "FR":
@@ -335,7 +341,7 @@ def parse_nec_file(content: str) -> NECFileData:
                     )
                 else:
                     data.frequency_stop_mhz = data.frequency_start_mhz
-            except (ValueError, IndexError):
+            except (ValueError, IndexError, OverflowError):
                 pass
 
         elif card == "EN":
