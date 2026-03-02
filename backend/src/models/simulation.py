@@ -22,8 +22,8 @@ class NearFieldConfig(BaseModel):
 class FrequencyConfig(BaseModel):
     """Frequency sweep configuration."""
 
-    start_mhz: float = Field(ge=0.1, le=500.0, description="Start frequency (MHz)")
-    stop_mhz: float = Field(ge=0.1, le=500.0, description="Stop frequency (MHz)")
+    start_mhz: float = Field(ge=0.1, le=2000.0, description="Start frequency (MHz)")
+    stop_mhz: float = Field(ge=0.1, le=2000.0, description="Stop frequency (MHz)")
     steps: int = Field(ge=1, le=201, description="Number of frequency steps")
 
     @model_validator(mode="after")
@@ -72,7 +72,7 @@ class SimulationRequest(BaseModel):
     ground: GroundConfig = Field(default_factory=GroundConfig)
     frequency: FrequencyConfig
     pattern: PatternConfig = Field(default_factory=PatternConfig)
-    comment: str = Field(default="AntSim simulation", max_length=200)
+    comment: str = Field(default="AntennaSim simulation", max_length=200)
 
     # V2 optional advanced fields
     loads: list[LumpedLoad] = Field(default_factory=list, max_length=100,

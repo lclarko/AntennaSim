@@ -52,14 +52,14 @@ class ImportResponse(BaseModel):
 class ExportRequest(BaseModel):
     """Export antenna data to .maa or .nec format."""
     format: str = Field(description="Output format: 'maa' or 'nec'")
-    title: str = Field(default="AntSim export")
+    title: str = Field(default="AntennaSim export")
     wires: list[Wire]
     excitations: list[Excitation]
     loads: list[LumpedLoad] = Field(default_factory=list)
     transmission_lines: list[TransmissionLine] = Field(default_factory=list)
     ground: GroundConfig = Field(default_factory=GroundConfig)
-    frequency_start_mhz: float = Field(default=14.0, ge=0.1, le=500.0)
-    frequency_stop_mhz: float = Field(default=14.5, ge=0.1, le=500.0)
+    frequency_start_mhz: float = Field(default=14.0, ge=0.1, le=2000.0)
+    frequency_stop_mhz: float = Field(default=14.5, ge=0.1, le=2000.0)
     frequency_steps: int = Field(default=11, ge=1, le=201)
 
 

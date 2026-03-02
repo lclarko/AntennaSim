@@ -159,13 +159,13 @@ export function ImportExportPanel({ className = "" }: ImportExportPanelProps) {
       // Reset input
       e.target.value = "";
     },
-    [clearAll, addWire, setExcitation, setGround, setFrequencyRange]
+    [clearAll, addWire, addWireRaw, setExcitation, setGround, setFrequencyRange]
   );
 
   const handleExportJSON = useCallback(() => {
     const data = {
       version: 1,
-      title: "AntSim Project",
+      title: "AntennaSim Project",
       wires: wires.map((w) => ({
         tag: w.tag,
         segments: w.segments,
@@ -187,7 +187,7 @@ export function ImportExportPanel({ className = "" }: ImportExportPanelProps) {
     try {
       const resp = await api.post<{ content: string }>("/api/v1/convert/export", {
         format: "nec",
-        title: "AntSim export",
+        title: "AntennaSim export",
         wires: wires.map((w) => ({
           tag: w.tag,
           segments: w.segments,
@@ -213,7 +213,7 @@ export function ImportExportPanel({ className = "" }: ImportExportPanelProps) {
     try {
       const resp = await api.post<{ content: string }>("/api/v1/convert/export", {
         format: "maa",
-        title: "AntSim export",
+        title: "AntennaSim export",
         wires: wires.map((w) => ({
           tag: w.tag,
           segments: w.segments,
@@ -254,10 +254,6 @@ export function ImportExportPanel({ className = "" }: ImportExportPanelProps) {
         className="hidden"
         onChange={handleFileChange}
       />
-
-      <h4 className="text-[10px] font-medium text-text-secondary uppercase tracking-wider">
-        Import / Export
-      </h4>
 
       {/* Import */}
       <button

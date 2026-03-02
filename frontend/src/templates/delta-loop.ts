@@ -52,7 +52,7 @@ export const deltaLoopTemplate: AntennaTemplate = {
     "Perimeter = 1 wavelength; each side = λ/3 for equilateral triangle.",
     "About 1 dB more gain and lower noise than a dipole at the same height.",
   ],
-  relatedTemplates: ["quad", "dipole", "magnetic-loop"],
+  relatedTemplates: ["horizontal-delta-loop", "quad", "dipole", "magnetic-loop"],
 
   parameters: [
     {
@@ -61,7 +61,7 @@ export const deltaLoopTemplate: AntennaTemplate = {
       description: "Resonant frequency of the loop",
       unit: "MHz",
       min: 0.5,
-      max: 450,
+      max: 2000,
       step: 0.1,
       defaultValue: 14.15,
       decimals: 3,
@@ -180,7 +180,7 @@ export const deltaLoopTemplate: AntennaTemplate = {
     const bw = freq * 0.1;
     return {
       start_mhz: Math.max(0.1, freq - bw / 2),
-      stop_mhz: Math.min(500, freq + bw / 2),
+      stop_mhz: Math.min(2000, freq + bw / 2),
       steps: 31,
     };
   },

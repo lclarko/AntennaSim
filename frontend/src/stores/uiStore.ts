@@ -3,7 +3,7 @@
  */
 
 import { create } from "zustand";
-import type { ViewToggles, CameraPreset } from "../components/three/types";
+import type { ViewToggles } from "../components/three/types";
 import type { S1PFile } from "../utils/s1p-parser";
 import type { MatchingConfig } from "../utils/units";
 import { DEFAULT_MATCHING } from "../utils/units";
@@ -21,8 +21,6 @@ interface UIState {
   imperial: boolean;
   /** 3D viewport view toggles */
   viewToggles: ViewToggles;
-  /** Active camera preset (null = user-manipulated) */
-  activePreset: CameraPreset | null;
   /** Active results tab */
   resultsTab: ResultsTab;
   /** Active mobile bottom sheet tab */
@@ -31,6 +29,8 @@ interface UIState {
   s1pFile: S1PFile | null;
   /** Impedance matching (balun/unun) configuration */
   matching: MatchingConfig;
+  /** Show feedpoint marker at exact NEC2 segment center (true) or snapped to wire edge (false) */
+  accurateFeedpoint: boolean;
 
   // Actions
   setTheme: (theme: Theme) => void;
@@ -41,11 +41,11 @@ interface UIState {
   toggleUnits: () => void;
   setViewToggle: (key: keyof ViewToggles, value: boolean) => void;
   toggleView: (key: keyof ViewToggles) => void;
-  setActivePreset: (preset: CameraPreset | null) => void;
   setResultsTab: (tab: ResultsTab) => void;
   setMobileTab: (tab: MobileTab) => void;
   setS1PFile: (file: S1PFile | null) => void;
   setMatching: (matching: MatchingConfig) => void;
+  setAccurateFeedpoint: (value: boolean) => void;
 }
 
 export const useUIStore = create<UIState>((set) => ({
@@ -66,11 +66,11 @@ export const useUIStore = create<UIState>((set) => ({
     currentFlow: false,
     slice: false,
   },
-  activePreset: "isometric" as CameraPreset,
   resultsTab: "swr",
   mobileTab: "antenna",
   s1pFile: null,
   matching: { ...DEFAULT_MATCHING },
+  accurateFeedpoint: false,
 
   setTheme: (theme) => set({ theme }),
   toggleTheme: () =>
@@ -86,9 +86,9 @@ export const useUIStore = create<UIState>((set) => ({
     set((s) => ({
       viewToggles: { ...s.viewToggles, [key]: !s.viewToggles[key] },
     })),
-  setActivePreset: (preset) => set({ activePreset: preset }),
   setResultsTab: (tab) => set({ resultsTab: tab }),
   setMobileTab: (tab) => set({ mobileTab: tab }),
   setS1PFile: (file) => set({ s1pFile: file }),
   setMatching: (matching) => set({ matching }),
+  setAccurateFeedpoint: (value) => set({ accurateFeedpoint: value }),
 }));
