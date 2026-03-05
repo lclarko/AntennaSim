@@ -30,12 +30,22 @@ import { ImportExportPanel } from "../components/editors/ImportExportPanel";
 import { OptimizerPanel } from "../components/editors/OptimizerPanel";
 import { ColorScale } from "../components/ui/ColorScale";
 import { SimulationLoadingOverlay } from "../components/ui/SimulationLoadingOverlay";
+import { BandPresets } from "../components/ui/BandPresets";
+import { FrequencySegmentEditor } from "../components/ui/FrequencySegmentEditor";
+import { ProjectActions } from "../components/ui/ProjectActions";
+import { ValidationWarnings } from "../components/ui/ValidationWarnings";
 import { Button } from "../components/ui/Button";
 import { Slider } from "../components/ui/Slider";
+import { NumberInput } from "../components/ui/NumberInput";
 import { SegmentedControl } from "../components/ui/SegmentedControl";
+import { createEditorProject } from "../utils/project-file";
+import { validateSimulationRequest } from "../engine/validation";
 import { templates } from "../templates";
 import { getDefaultParams } from "../templates/types";
-import type { AntennaTemplate } from "../templates/types";
+import type { ProjectFile } from "../utils/project-file";
+import type { AntennaTemplate, FrequencyRange } from "../templates/types";
+import { bandToSegment, hasBandSegment, removeBandSegment } from "../utils/ham-bands";
+import type { HamBand } from "../utils/ham-bands";
 import type { ViewToggles } from "../components/three/types";
 
 /** Mobile tab options */
@@ -56,7 +66,9 @@ export function EditorPage() {
   const ground = useEditorStore((s) => s.ground);
   const setGround = useEditorStore((s) => s.setGround);
   const frequencyRange = useEditorStore((s) => s.frequencyRange);
+  const frequencySegments = useEditorStore((s) => s.frequencySegments);
   const setFrequencyRange = useEditorStore((s) => s.setFrequencyRange);
+  const setFrequencySegments = useEditorStore((s) => s.setFrequencySegments);
   const designFrequencyMhz = useEditorStore((s) => s.designFrequencyMhz);
   const setDesignFrequency = useEditorStore((s) => s.setDesignFrequency);
   const mode = useEditorStore((s) => s.mode);
@@ -71,6 +83,9 @@ export function EditorPage() {
   const deselectAll = useEditorStore((s) => s.deselectAll);
   const deleteSelected = useEditorStore((s) => s.deleteSelected);
   const selectAll = useEditorStore((s) => s.selectAll);
+  const copySelected = useEditorStore((s) => s.copySelected);
+  const paste = useEditorStore((s) => s.paste);
+  const duplicateSelected = useEditorStore((s) => s.duplicateSelected);
   const getWireGeometry = useEditorStore((s) => s.getWireGeometry);
   const getTotalSegments = useEditorStore((s) => s.getTotalSegments);
   const moveAllWiresZ = useEditorStore((s) => s.moveAllWiresZ);
@@ -140,9 +155,9 @@ export function EditorPage() {
       )
         return;
 
-      if (e.key === "v" || e.key === "V") setMode("select");
+      if ((e.key === "v" || e.key === "V") && !e.ctrlKey && !e.metaKey) setMode("select");
       else if (e.key === "a" && !e.ctrlKey && !e.metaKey) setMode("add");
-      else if (e.key === "m" || e.key === "M") setMode("move");
+      else if ((e.key === "m" || e.key === "M") && !e.ctrlKey && !e.metaKey) setMode("move");
       else if (e.key === "Escape") {
         deselectAll();
         setMode("select");
@@ -159,12 +174,22 @@ export function EditorPage() {
       } else if ((e.ctrlKey || e.metaKey) && e.key === "a") {
         e.preventDefault();
         selectAll();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "c") {
+        e.preventDefault();
+        copySelected();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "v" && !e.shiftKey) {
+        // Only intercept Ctrl+V when not also pressing shift (which some browsers use for paste-as-text)
+        e.preventDefault();
+        paste();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "d") {
+        e.preventDefault();
+        duplicateSelected();
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [setMode, deselectAll, deleteSelected, undo, redo, selectAll]);
+  }, [setMode, deselectAll, deleteSelected, undo, redo, selectAll, copySelected, paste, duplicateSelected]);
 
   // Clear stale results on page entry (prevents cross-page state leaks)
   // and whenever antenna geometry or config changes.
@@ -186,6 +211,7 @@ export function EditorPage() {
       excitations,
       ground,
       frequency: frequencyRange,
+      frequencySegments: frequencySegments.length > 0 ? frequencySegments : undefined,
       loads: loads.length > 0 ? loads : undefined,
       transmission_lines: transmissionLines.length > 0 ? transmissionLines : undefined,
       compute_currents: computeCurrents,
@@ -197,7 +223,7 @@ export function EditorPage() {
       },
       pattern_step: patternStep,
     });
-  }, [wires, excitations, ground, frequencyRange, loads, transmissionLines, computeCurrents, patternStep, simulateAdvanced, getWireGeometry]);
+  }, [wires, excitations, ground, frequencyRange, frequencySegments, loads, transmissionLines, computeCurrents, patternStep, simulateAdvanced, getWireGeometry]);
 
   // Template loader handlers
   const handleTemplateSelect = useCallback((t: AntennaTemplate) => {
@@ -233,8 +259,74 @@ export function EditorPage() {
     setEditorSection("wires");
   }, [selectedTemplate, templateParams, clearAll, setWires, setDesignFrequency, setFrequencyRange, setGround]);
 
+  const handleBandSelect = useCallback(
+    (range: FrequencyRange, _band: HamBand) => {
+      setFrequencySegments([]);
+      setFrequencyRange(range);
+      const center = (range.start_mhz + range.stop_mhz) / 2;
+      setDesignFrequency(center);
+    },
+    [setFrequencySegments, setFrequencyRange, setDesignFrequency]
+  );
+
+  const handleToggleBand = useCallback(
+    (band: HamBand) => {
+      if (hasBandSegment(frequencySegments, band)) {
+        setFrequencySegments(removeBandSegment(frequencySegments, band));
+      } else {
+        setFrequencySegments([...frequencySegments, bandToSegment(band)]);
+      }
+    },
+    [frequencySegments, setFrequencySegments]
+  );
+
+  const handleProjectSave = useCallback((): ProjectFile => {
+    const wireGeometry = getWireGeometry();
+    return createEditorProject(
+      wireGeometry,
+      excitations,
+      loads,
+      transmissionLines,
+      ground,
+      frequencyRange,
+      designFrequencyMhz,
+      simResult ?? null,
+    );
+  }, [getWireGeometry, excitations, loads, transmissionLines, ground, frequencyRange, designFrequencyMhz, simResult]);
+
+  const handleProjectLoad = useCallback(
+    (project: ProjectFile) => {
+      if (project.mode !== "editor" || !project.editor) {
+        alert("This project was saved from the Simulator. Open it there instead.");
+        return;
+      }
+      const ed = project.editor;
+      clearAll();
+      setWires(
+        ed.wires.map((w) => ({ ...w, selected: false })),
+        ed.excitations,
+      );
+      setGround(ed.ground);
+      setFrequencyRange(ed.frequencyRange);
+      setDesignFrequency(ed.designFrequencyMhz);
+    },
+    [clearAll, setWires, setGround, setFrequencyRange, setDesignFrequency]
+  );
+
   const isLoading = simStatus === "loading";
   const canRun = wires.length > 0 && excitations.length > 0;
+
+  // Pre-simulation validation
+  // wires is intentionally used as the dep trigger — getWireGeometry() reads from the store
+  const wireGeometry = useMemo(() => {
+    void wires; // trigger re-computation when wires change
+    return getWireGeometry();
+  }, [wires, getWireGeometry]);
+  const validation = useMemo(
+    () => validateSimulationRequest(wireGeometry, excitations, ground, frequencyRange),
+    [wireGeometry, excitations, ground, frequencyRange]
+  );
+
   const patternData = selectedFreqResult?.pattern ?? null;
   const currentData = selectedFreqResult?.currents ?? null;
   const nearFieldData = simResult?.near_field ?? null;
@@ -257,12 +349,6 @@ export function EditorPage() {
       maxZ = Math.max(maxZ, w.z1, w.z2);
     }
     return Math.round(maxZ * 100) / 100;
-  }, [wires]);
-
-  // Warning: all wires at ground level
-  const allWiresAtGround = useMemo(() => {
-    if (wires.length === 0) return false;
-    return wires.every((w) => Math.abs(w.z1) < 0.001 && Math.abs(w.z2) < 0.001);
   }, [wires]);
 
   // Height adjustment handler — shifts all wires so that the lowest point is at the target height
@@ -381,8 +467,8 @@ export function EditorPage() {
 
         {/* === RIGHT PANEL (desktop only) === */}
         <aside className="hidden lg:flex flex-col w-80 xl:w-96 border-l border-border bg-surface overflow-hidden shrink-0">
-          {/* Tab switcher: Editor vs Results */}
-          <div className="p-2 border-b border-border shrink-0">
+          {/* Tab switcher: Editor vs Results + project actions */}
+          <div className="p-2 border-b border-border shrink-0 space-y-1.5">
             <SegmentedControl
               segments={[
                 { key: "editor", label: "Editor" },
@@ -390,6 +476,10 @@ export function EditorPage() {
               ]}
               activeKey={rightPanelTab}
               onChange={(key) => setRightPanelTab(key as "editor" | "results")}
+            />
+            <ProjectActions
+              onSave={handleProjectSave}
+              onLoad={handleProjectLoad}
             />
           </div>
 
@@ -563,76 +653,32 @@ export function EditorPage() {
           {/* Bottom: Frequency, Sweep, Run button (always visible) */}
           <div className="p-2 space-y-2 shrink-0 border-t border-border">
             {/* Design frequency */}
-            <div className="flex items-center gap-2">
-              <label className="text-[10px] text-text-secondary shrink-0">
-                Design freq:
-              </label>
-              <input
-                type="number"
-                step="0.1"
-                min="0.1"
-                max="500"
-                value={designFrequencyMhz}
-                onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  if (!isNaN(v) && v > 0) setDesignFrequency(v);
-                }}
-                className="flex-1 bg-background text-text-primary text-[10px] font-mono px-1.5 py-0.5 rounded border border-border focus:border-accent/50 outline-none text-right"
-              />
-              <span className="text-[10px] text-text-secondary">MHz</span>
-            </div>
+            <NumberInput
+              label="Design freq:"
+              value={designFrequencyMhz}
+              onChange={setDesignFrequency}
+              min={0.1}
+              max={500}
+              decimals={1}
+              unit="MHz"
+            />
 
-            {/* Frequency sweep range */}
-            <div className="flex items-center gap-1">
-              <label className="text-[10px] text-text-secondary shrink-0">
-                Sweep:
-              </label>
-              <input
-                type="number"
-                step="0.1"
-                min="0.1"
-                max="500"
-                value={frequencyRange.start_mhz}
-                onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  if (!isNaN(v) && v > 0 && v < frequencyRange.stop_mhz)
-                    setFrequencyRange({ ...frequencyRange, start_mhz: v });
-                }}
-                className="w-16 bg-background text-text-primary text-[10px] font-mono px-1 py-0.5 rounded border border-border focus:border-accent/50 outline-none text-right"
-                title="Sweep start (MHz)"
-              />
-              <span className="text-[10px] text-text-secondary">-</span>
-              <input
-                type="number"
-                step="0.1"
-                min="0.1"
-                max="500"
-                value={frequencyRange.stop_mhz}
-                onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  if (!isNaN(v) && v > 0 && v > frequencyRange.start_mhz)
-                    setFrequencyRange({ ...frequencyRange, stop_mhz: v });
-                }}
-                className="w-16 bg-background text-text-primary text-[10px] font-mono px-1 py-0.5 rounded border border-border focus:border-accent/50 outline-none text-right"
-                title="Sweep stop (MHz)"
-              />
-              <span className="text-[10px] text-text-secondary">MHz</span>
-              <input
-                type="number"
-                step="1"
-                min="1"
-                max="201"
-                value={frequencyRange.steps}
-                onChange={(e) => {
-                  const v = parseInt(e.target.value, 10);
-                  if (!isNaN(v) && v >= 1 && v <= 201)
-                    setFrequencyRange({ ...frequencyRange, steps: v });
-                }}
-                className="w-10 bg-background text-text-primary text-[10px] font-mono px-1 py-0.5 rounded border border-border focus:border-accent/50 outline-none text-right"
-                title="Number of sweep steps"
-              />
-              <span className="text-[10px] text-text-secondary">pts</span>
-            </div>
+            {/* Band presets */}
+            <BandPresets
+              currentRange={frequencyRange}
+              onSelectBand={handleBandSelect}
+              segments={frequencySegments}
+              onToggleBand={handleToggleBand}
+              hfOnly
+            />
+
+            {/* Frequency sweep / segments */}
+            <FrequencySegmentEditor
+              frequencyRange={frequencyRange}
+              onFrequencyRangeChange={setFrequencyRange}
+              segments={frequencySegments}
+              onSegmentsChange={setFrequencySegments}
+            />
 
             {/* Antenna height */}
             {wires.length > 0 && (
@@ -649,25 +695,14 @@ export function EditorPage() {
               />
             )}
 
-            {/* Warning: wires at ground level */}
-            {allWiresAtGround && (
-              <div className="flex items-start gap-1.5 p-1.5 rounded-md bg-swr-warning/10 border border-swr-warning/30">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-swr-warning shrink-0 mt-0.5">
-                  <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-                  <line x1="12" y1="9" x2="12" y2="13" />
-                  <line x1="12" y1="17" x2="12.01" y2="17" />
-                </svg>
-                <p className="text-[10px] text-swr-warning leading-tight">
-                  All wires are at ground level (Z=0). Use the height slider above to raise the antenna, or results will show no radiation.
-                </p>
-              </div>
-            )}
+            {/* Validation warnings */}
+            <ValidationWarnings validation={validation} />
 
             {/* Run */}
             <Button
               onClick={handleRunSimulation}
               loading={isLoading}
-              disabled={isLoading || !canRun}
+              disabled={isLoading || !canRun || !validation.valid}
               className="w-full"
               size="sm"
             >
@@ -746,56 +781,32 @@ export function EditorPage() {
                 />
               )}
               {/* Design frequency */}
-              <div className="flex items-center gap-2">
-                <label className="text-[11px] text-text-secondary shrink-0">Design freq:</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  min="0.1"
-                  max="500"
-                  value={designFrequencyMhz}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value);
-                    if (!isNaN(v) && v > 0) setDesignFrequency(v);
-                  }}
-                  className="flex-1 bg-background text-text-primary text-xs font-mono px-1.5 py-1 rounded border border-border focus:border-accent/50 outline-none text-right"
-                />
-                <span className="text-[11px] text-text-secondary">MHz</span>
-              </div>
-              {/* Frequency sweep */}
-              <div className="flex items-center gap-1 flex-wrap">
-                <label className="text-[11px] text-text-secondary shrink-0">Sweep:</label>
-                <input
-                  type="number" step="0.1" min="0.1" max="500"
-                  value={frequencyRange.start_mhz}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value);
-                    if (!isNaN(v) && v > 0 && v < frequencyRange.stop_mhz) setFrequencyRange({ ...frequencyRange, start_mhz: v });
-                  }}
-                  className="w-16 bg-background text-text-primary text-xs font-mono px-1 py-1 rounded border border-border outline-none text-right"
-                />
-                <span className="text-[11px] text-text-secondary">-</span>
-                <input
-                  type="number" step="0.1" min="0.1" max="500"
-                  value={frequencyRange.stop_mhz}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value);
-                    if (!isNaN(v) && v > 0 && v > frequencyRange.start_mhz) setFrequencyRange({ ...frequencyRange, stop_mhz: v });
-                  }}
-                  className="w-16 bg-background text-text-primary text-xs font-mono px-1 py-1 rounded border border-border outline-none text-right"
-                />
-                <span className="text-[11px] text-text-secondary">MHz</span>
-                <input
-                  type="number" step="1" min="1" max="201"
-                  value={frequencyRange.steps}
-                  onChange={(e) => {
-                    const v = parseInt(e.target.value, 10);
-                    if (!isNaN(v) && v >= 1 && v <= 201) setFrequencyRange({ ...frequencyRange, steps: v });
-                  }}
-                  className="w-12 bg-background text-text-primary text-xs font-mono px-1 py-1 rounded border border-border outline-none text-right"
-                />
-                <span className="text-[11px] text-text-secondary">pts</span>
-              </div>
+              <NumberInput
+                label="Design freq:"
+                value={designFrequencyMhz}
+                onChange={setDesignFrequency}
+                min={0.1}
+                max={500}
+                decimals={1}
+                unit="MHz"
+                size="sm"
+              />
+              {/* Band presets (multi-select) */}
+              <BandPresets
+                currentRange={frequencyRange}
+                onSelectBand={handleBandSelect}
+                segments={frequencySegments}
+                onToggleBand={handleToggleBand}
+                hfOnly
+              />
+              {/* Frequency sweep / segments */}
+              <FrequencySegmentEditor
+                frequencyRange={frequencyRange}
+                onFrequencyRangeChange={setFrequencyRange}
+                segments={frequencySegments}
+                onSegmentsChange={setFrequencySegments}
+                size="sm"
+              />
               {/* Snap size */}
               <div>
                 <label className="text-[11px] text-text-secondary font-semibold uppercase tracking-wider block mb-1">Snap Size</label>

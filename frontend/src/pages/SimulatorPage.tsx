@@ -8,7 +8,7 @@
  *   [3D Viewport (45%)] [Bottom Sheet: Antenna | Results tabs]
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAntennaStore } from "../stores/antennaStore";
 import { useSimulationStore } from "../stores/simulationStore";
 import { useUIStore } from "../stores/uiStore";
@@ -26,9 +26,19 @@ import { Button } from "../components/ui/Button";
 import { SegmentedControl } from "../components/ui/SegmentedControl";
 import { ColorScale } from "../components/ui/ColorScale";
 import { SimulationLoadingOverlay } from "../components/ui/SimulationLoadingOverlay";
+import { BandPresets } from "../components/ui/BandPresets";
+import { FrequencySegmentEditor } from "../components/ui/FrequencySegmentEditor";
+import { ProjectActions } from "../components/ui/ProjectActions";
+import { ValidationWarnings } from "../components/ui/ValidationWarnings";
 import { ResultsPanel } from "../components/results/ResultsTabs";
 import { PatternFrequencySlider } from "../components/results/PatternFrequencySlider";
-import type { AntennaTemplate } from "../templates/types";
+import { createSimulatorProject } from "../utils/project-file";
+import { validateSimulationRequest } from "../engine/validation";
+import { getTemplate, templateMap } from "../templates";
+import type { ProjectFile } from "../utils/project-file";
+import type { AntennaTemplate, FrequencyRange } from "../templates/types";
+import { bandToSegment, hasBandSegment, removeBandSegment } from "../utils/ham-bands";
+import type { HamBand } from "../utils/ham-bands";
 import type { ViewToggles } from "../components/three/types";
 
 /** Mobile bottom sheet tabs */
@@ -47,9 +57,12 @@ export function SimulatorPage() {
   const wireGeometry = useAntennaStore((s) => s.wireGeometry);
   const excitation = useAntennaStore((s) => s.excitation);
   const frequencyRange = useAntennaStore((s) => s.frequencyRange);
+  const frequencySegments = useAntennaStore((s) => s.frequencySegments);
   const setTemplate = useAntennaStore((s) => s.setTemplate);
   const setParam = useAntennaStore((s) => s.setParam);
   const setGround = useAntennaStore((s) => s.setGround);
+  const setFrequencyRange = useAntennaStore((s) => s.setFrequencyRange);
+  const setFrequencySegments = useAntennaStore((s) => s.setFrequencySegments);
 
   // Simulation store
   const simStatus = useSimulationStore((s) => s.status);
@@ -90,12 +103,76 @@ export function SimulatorPage() {
   const [patternStep, setPatternStep] = useState(5);
 
   const handleRunSimulation = useCallback(() => {
-    simulate(wireGeometry, excitation, ground, frequencyRange, patternStep);
-  }, [simulate, wireGeometry, excitation, ground, frequencyRange, patternStep]);
+    simulate(wireGeometry, excitation, ground, frequencyRange, patternStep, frequencySegments);
+  }, [simulate, wireGeometry, excitation, ground, frequencyRange, patternStep, frequencySegments]);
+
+  const handleBandSelect = useCallback(
+    (range: FrequencyRange, _band: HamBand) => {
+      // Single-select fallback — clear segments and set single range
+      setFrequencySegments([]);
+      setFrequencyRange(range);
+      // Also update the template's frequency param if it has one, using band center
+      const center = (range.start_mhz + range.stop_mhz) / 2;
+      const freqParam = template.parameters.find(
+        (p) => p.key === "frequency" || p.key === "freq"
+      );
+      if (freqParam) {
+        setParam(freqParam.key, Math.round(center * 1000) / 1000);
+      }
+    },
+    [setFrequencySegments, setFrequencyRange, setParam, template.parameters]
+  );
+
+  const handleToggleBand = useCallback(
+    (band: HamBand) => {
+      if (hasBandSegment(frequencySegments, band)) {
+        const updated = removeBandSegment(frequencySegments, band);
+        setFrequencySegments(updated);
+      } else {
+        setFrequencySegments([...frequencySegments, bandToSegment(band)]);
+      }
+    },
+    [frequencySegments, setFrequencySegments]
+  );
+
+  const handleProjectSave = useCallback((): ProjectFile => {
+    return createSimulatorProject(template.id, params, ground, result ?? null);
+  }, [template.id, params, ground, result]);
+
+  const handleProjectLoad = useCallback(
+    (project: ProjectFile) => {
+      if (project.mode !== "simulator" || !project.simulator) {
+        alert("This project was saved from the Wire Editor. Open it there instead.");
+        return;
+      }
+      const { templateId, params: savedParams, ground: savedGround } = project.simulator;
+      if (!templateMap.has(templateId)) {
+        alert(`Unknown template "${templateId}". It may have been removed in a newer version.`);
+        return;
+      }
+      const t = getTemplate(templateId);
+      setTemplate(t);
+      // setTemplate resets params to defaults — override with saved values
+      // Use a microtask to let setTemplate's state settle first
+      queueMicrotask(() => {
+        const store = useAntennaStore.getState();
+        const merged = { ...store.params, ...savedParams };
+        useAntennaStore.getState().setParams(merged);
+        useAntennaStore.getState().setGround(savedGround);
+      });
+    },
+    [setTemplate]
+  );
 
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
   const isLoading = simStatus === "loading";
+
+  // Pre-simulation validation
+  const validation = useMemo(
+    () => validateSimulationRequest(wireGeometry, [excitation], ground, frequencyRange),
+    [wireGeometry, excitation, ground, frequencyRange]
+  );
 
   // Pattern data for 3D viewport
   const patternData = selectedFreqResult?.pattern ?? null;
@@ -111,6 +188,11 @@ export function SimulatorPage() {
         {/* === LEFT PANEL (desktop only) === */}
         <aside className="hidden lg:flex flex-col w-80 xl:w-96 border-r border-border bg-surface overflow-y-auto shrink-0">
           <div className="p-3 space-y-4 flex-1">
+            <ProjectActions
+              onSave={handleProjectSave}
+              onLoad={handleProjectLoad}
+            />
+
             <TemplatePicker
               selectedId={template.id}
               onSelect={handleTemplateSelect}
@@ -131,6 +213,25 @@ export function SimulatorPage() {
             <div className="border-t border-border" />
 
             <BalunEditor matching={matching} onChange={setMatching} />
+
+            <div className="border-t border-border" />
+
+            <BandPresets
+              currentRange={frequencyRange}
+              onSelectBand={handleBandSelect}
+              segments={frequencySegments}
+              onToggleBand={handleToggleBand}
+              hfOnly
+            />
+
+            <div className="border-t border-border" />
+
+            <FrequencySegmentEditor
+              frequencyRange={frequencyRange}
+              onFrequencyRangeChange={setFrequencyRange}
+              segments={frequencySegments}
+              onSegmentsChange={setFrequencySegments}
+            />
 
             <div className="border-t border-border" />
 
@@ -182,11 +283,12 @@ export function SimulatorPage() {
           </div>
 
           {/* Run button — bottom of left panel */}
-          <div className="p-3 border-t border-border">
+          <div className="p-3 border-t border-border space-y-2">
+            <ValidationWarnings validation={validation} />
             <Button
               onClick={handleRunSimulation}
               loading={isLoading}
-              disabled={isLoading}
+              disabled={isLoading || !validation.valid}
               className="w-full"
               size="md"
             >
@@ -269,6 +371,10 @@ export function SimulatorPage() {
         <div className="px-3 py-2 flex-1 overflow-y-auto">
           {mobileTab === "antenna" && (
             <div className="space-y-3">
+              <ProjectActions
+                onSave={handleProjectSave}
+                onLoad={handleProjectLoad}
+              />
               <TemplatePicker
                 selectedId={template.id}
                 onSelect={handleTemplateSelect}
@@ -280,6 +386,22 @@ export function SimulatorPage() {
               />
               <GroundEditor ground={ground} onChange={setGround} />
               <BalunEditor matching={matching} onChange={setMatching} />
+
+              <BandPresets
+                currentRange={frequencyRange}
+                onSelectBand={handleBandSelect}
+                segments={frequencySegments}
+                onToggleBand={handleToggleBand}
+                hfOnly
+              />
+
+              <FrequencySegmentEditor
+                frequencyRange={frequencyRange}
+                onFrequencyRangeChange={setFrequencyRange}
+                segments={frequencySegments}
+                onSegmentsChange={setFrequencySegments}
+                size="sm"
+              />
 
               {/* Pattern resolution */}
               <div className="space-y-1">
@@ -302,6 +424,8 @@ export function SimulatorPage() {
                   </p>
                 )}
               </div>
+
+              <ValidationWarnings validation={validation} />
             </div>
           )}
           {mobileTab === "results" && <ResultsPanel />}

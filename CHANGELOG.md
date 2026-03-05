@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0] - 2026-03-05
+
+### Added
+
+- Multi-segment frequency sweeps: simulate multiple band ranges in a single NEC2 run (e.g., 20m + 15m + 10m simultaneously)
+- `FrequencySegment` type and `frequencySegments` field on both stores, engine request types, and backend Pydantic model
+- BandPresets dual interaction: click to toggle band as frequency segment, Ctrl+click (long-press on mobile) to change antenna design frequency and set single-band sweep
+- FrequencySegmentEditor component: compact segment list with per-segment start/stop/steps controls, total point counter, and 301-point cap
+- Card deck builders (WASM + backend) emit interleaved FR + NE + RP card blocks for multi-segment sweeps
+- `bandToSegment`, `hasBandSegment`, `removeBandSegment` utilities in `ham-bands.ts`
+- NumberInput click-to-edit component replacing all raw `<input type="number">` fields across 5 files
+- Frequency sweep controls (start/stop/steps) on the Simulator page for manual sweep range override
+- Adaptive sweep step count (`computeSteps`): ~25 pts/MHz, clamped [11, 101], auto-adjusts when range changes
+- Frequency sweep controls and validation warnings on the Simulator mobile bottom sheet
+- ProjectActions (save/load) on the Simulator mobile bottom sheet
+- Ham band frequency presets with ITU Region 1/2/3 support and band analysis utilities
+- Band preset pill buttons integrated into Simulator and Editor pages for quick frequency selection
+- Project save/load (.antennasim JSON format) with schema validation and round-trip integrity
+- Save/Open project buttons with Ctrl+S / Ctrl+O keyboard shortcuts on both pages
+- Pre-simulation validation engine with 12 checks (lambda/10, zero-length wires, below-ground, segment limits, overlapping wires, etc.)
+- Validation warnings banner shown above the Run button in both Simulator and Editor pages
+- Multi-band analysis results tab showing per-band SWR, gain, bandwidth, and quality rating for all HF bands
+- Impedance matching network calculator with L, Pi, and T network topologies
+- Matching network results tab showing component values, Q factor, bandwidth, and schematic
+- Wire editor power tools: copy (Ctrl+C), paste (Ctrl+V), duplicate (Ctrl+D), and mirror selected wires
+- Copy/paste/duplicate/mirror buttons in editor toolbar
+- `setFrequencyRange` action on antennaStore for overriding template-derived frequency range
+- Extracted shared ham band definitions from SWRChart into reusable `utils/ham-bands.ts`
+- 78 new tests for multi-segment sweeps, ham bands (including computeSteps), project files, validation engine, and matching networks (total: 308)
+
+### Fixed
+
+- Band preset frequency ranges no longer get overwritten when template parameters change (antennaStore `_frequencyOverride` flag)
+- Sweep step count now adapts to bandwidth instead of staying at a hardcoded value
+
 ## [0.8.0] - 2026-03-05
 
 ### Added
@@ -221,6 +256,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 This was the initial public release -- a complete rewrite of the original prototype into a production-quality application with React 19, TypeScript, FastAPI, and Docker.
 
+[1.0.0]: https://github.com/EA1FUO/AntennaSim/compare/v0.8.0...v1.0.0
 [0.8.0]: https://github.com/EA1FUO/AntennaSim/compare/v0.7.7...v0.8.0
 [0.7.7]: https://github.com/EA1FUO/AntennaSim/compare/v0.7.6...v0.7.7
 [0.7.6]: https://github.com/EA1FUO/AntennaSim/compare/v0.7.5...v0.7.6

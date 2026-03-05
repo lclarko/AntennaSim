@@ -11,9 +11,10 @@
  */
 
 import { create } from "zustand";
-import type { WireGeometry, Excitation, GroundConfig, FrequencyRange } from "../templates/types";
+import type { WireGeometry, Excitation, GroundConfig, FrequencyRange, FrequencySegment } from "../templates/types";
 import type { LumpedLoad, TransmissionLine } from "../api/nec";
 import { autoSegment, centerSegment } from "../engine/segmentation";
+import { computeSteps } from "../utils/ham-bands";
 
 // ---- Types ----
 
@@ -38,7 +39,7 @@ interface EditorSnapshot {
 // ---- Default state ----
 
 const DEFAULT_GROUND: GroundConfig = { type: "average" };
-const DEFAULT_FREQ: FrequencyRange = { start_mhz: 13.5, stop_mhz: 15.0, steps: 31 };
+const DEFAULT_FREQ: FrequencyRange = { start_mhz: 13.5, stop_mhz: 15.0, steps: computeSteps(13.5, 15.0) };
 const DEFAULT_WIRE_RADIUS = 0.001; // 1mm
 const DEFAULT_FREQUENCY_MHZ = 14.1;
 
@@ -65,6 +66,8 @@ interface EditorState {
   ground: GroundConfig;
   /** Frequency range for simulation */
   frequencyRange: FrequencyRange;
+  /** Multi-segment frequency sweep (empty = use single frequencyRange) */
+  frequencySegments: FrequencySegment[];
   /** Snap grid size in meters (0 = disabled) */
   snapSize: number;
   /** Whether grid is shown */
@@ -121,6 +124,16 @@ interface EditorState {
   // ---- Settings ----
   setGround: (ground: GroundConfig) => void;
   setFrequencyRange: (freq: FrequencyRange) => void;
+  /** Set all frequency segments at once */
+  setFrequencySegments: (segments: FrequencySegment[]) => void;
+  /** Add a frequency segment */
+  addFrequencySegment: (segment: FrequencySegment) => void;
+  /** Remove a frequency segment by index */
+  removeFrequencySegment: (index: number) => void;
+  /** Update a frequency segment at a specific index */
+  updateFrequencySegment: (index: number, segment: FrequencySegment) => void;
+  /** Clear all frequency segments (revert to single sweep) */
+  clearFrequencySegments: () => void;
   setSnapSize: (size: number) => void;
   setShowGrid: (show: boolean) => void;
   setDesignFrequency: (mhz: number) => void;
@@ -144,6 +157,18 @@ interface EditorState {
 
   // ---- V2: Currents ----
   setComputeCurrents: (compute: boolean) => void;
+
+  // ---- Clipboard / Transform ----
+  /** Clipboard for copy/paste */
+  clipboard: EditorWire[];
+  /** Copy selected wires to clipboard */
+  copySelected: () => void;
+  /** Paste clipboard wires (offset by 1m in Y) */
+  paste: () => void;
+  /** Duplicate selected wires in place (offset by 0.5m in Y) */
+  duplicateSelected: () => void;
+  /** Mirror selected wires across an axis */
+  mirrorSelected: (axis: "x" | "y" | "z") => void;
 
   // ---- Undo/Redo ----
   undo: () => void;
@@ -222,10 +247,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   verticalDrag: false,
   ground: { ...DEFAULT_GROUND },
   frequencyRange: { ...DEFAULT_FREQ },
+  frequencySegments: [],
   snapSize: 0.1,
   showGrid: true,
   nextTag: 1,
   designFrequencyMhz: DEFAULT_FREQUENCY_MHZ,
+  clipboard: [],
 
   undoStack: [],
   redoStack: [],
@@ -478,6 +505,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   setGround: (ground) => set({ ground }),
   setFrequencyRange: (freq) => set({ frequencyRange: freq }),
+  setFrequencySegments: (segments) => set({ frequencySegments: segments }),
+  addFrequencySegment: (segment) => {
+    const state = get();
+    set({ frequencySegments: [...state.frequencySegments, segment] });
+  },
+  removeFrequencySegment: (index) => {
+    const state = get();
+    set({ frequencySegments: state.frequencySegments.filter((_, i) => i !== index) });
+  },
+  updateFrequencySegment: (index, segment) => {
+    const state = get();
+    const updated = [...state.frequencySegments];
+    updated[index] = segment;
+    set({ frequencySegments: updated });
+  },
+  clearFrequencySegments: () => set({ frequencySegments: [] }),
   setSnapSize: (size) => set({ snapSize: size }),
   setShowGrid: (show) => set({ showGrid: show }),
   setDesignFrequency: (mhz) => {
@@ -500,10 +543,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
     // Update frequency range to center on the new design frequency (~10% bandwidth)
     const bandwidth = mhz * 0.1;
+    const newStart = Math.round(Math.max(0.1, mhz - bandwidth / 2) * 1000) / 1000;
+    const newStop = Math.round(Math.min(2000, mhz + bandwidth / 2) * 1000) / 1000;
     const newFreqRange: FrequencyRange = {
-      start_mhz: Math.round(Math.max(0.1, mhz - bandwidth / 2) * 1000) / 1000,
-      stop_mhz: Math.round(Math.min(2000, mhz + bandwidth / 2) * 1000) / 1000,
-      steps: state.frequencyRange.steps,
+      start_mhz: newStart,
+      stop_mhz: newStop,
+      steps: computeSteps(newStart, newStop),
     };
     set({
       ...pushUndo(state),
@@ -583,6 +628,131 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   // ---- V2: Currents ----
 
   setComputeCurrents: (compute) => set({ computeCurrents: compute }),
+
+  // ---- Clipboard / Transform ----
+
+  copySelected: () => {
+    const state = get();
+    const selected = state.wires.filter((w) => state.selectedTags.has(w.tag));
+    if (selected.length === 0) return;
+    set({ clipboard: selected.map((w) => ({ ...w })) });
+  },
+
+  paste: () => {
+    const state = get();
+    if (state.clipboard.length === 0) return;
+
+    let tag = state.nextTag;
+    const newWires: EditorWire[] = state.clipboard.map((w) => ({
+      ...w,
+      tag: tag++,
+      y1: w.y1 + 1, // offset 1m in Y
+      y2: w.y2 + 1,
+      selected: false,
+    }));
+
+    const newSelected = new Set(newWires.map((w) => w.tag));
+
+    set({
+      ...pushUndo(state),
+      wires: [...state.wires, ...newWires],
+      selectedTags: newSelected,
+      nextTag: tag,
+    });
+  },
+
+  duplicateSelected: () => {
+    const state = get();
+    const selected = state.wires.filter((w) => state.selectedTags.has(w.tag));
+    if (selected.length === 0) return;
+
+    let tag = state.nextTag;
+    const newWires: EditorWire[] = selected.map((w) => ({
+      ...w,
+      tag: tag++,
+      y1: w.y1 + 0.5, // offset 0.5m in Y
+      y2: w.y2 + 0.5,
+      selected: false,
+    }));
+
+    // Also duplicate excitations that reference selected wires
+    const newExcitations = [...state.excitations];
+    for (const w of selected) {
+      const exc = state.excitations.find((e) => e.wire_tag === w.tag);
+      if (exc) {
+        const newWire = newWires.find(
+          (nw) =>
+            Math.abs(nw.x1 - w.x1) < 1e-6 &&
+            Math.abs(nw.z1 - w.z1) < 1e-6 &&
+            Math.abs(nw.x2 - w.x2) < 1e-6 &&
+            Math.abs(nw.z2 - w.z2) < 1e-6,
+        );
+        if (newWire) {
+          newExcitations.push({ ...exc, wire_tag: newWire.tag });
+        }
+      }
+    }
+
+    const newSelected = new Set(newWires.map((w) => w.tag));
+
+    set({
+      ...pushUndo(state),
+      wires: [...state.wires, ...newWires],
+      excitations: newExcitations,
+      selectedTags: newSelected,
+      nextTag: tag,
+    });
+  },
+
+  mirrorSelected: (axis) => {
+    const state = get();
+    const selected = state.wires.filter((w) => state.selectedTags.has(w.tag));
+    if (selected.length === 0) return;
+
+    // Compute centroid of selected wires
+    let cx = 0, cy = 0, cz = 0;
+    let count = 0;
+    for (const w of selected) {
+      cx += w.x1 + w.x2;
+      cy += w.y1 + w.y2;
+      cz += w.z1 + w.z2;
+      count += 2;
+    }
+    cx /= count;
+    cy /= count;
+    cz /= count;
+
+    // Mirror function: reflect coordinate across centroid on the given axis
+    const mirror = (val: number, center: number) => 2 * center - val;
+
+    let tag = state.nextTag;
+    const newWires: EditorWire[] = selected.map((w) => {
+      const mirrored: EditorWire = { ...w, tag: tag++, selected: false };
+      if (axis === "x") {
+        mirrored.x1 = mirror(w.x1, cx);
+        mirrored.x2 = mirror(w.x2, cx);
+      } else if (axis === "y") {
+        mirrored.y1 = mirror(w.y1, cy);
+        mirrored.y2 = mirror(w.y2, cy);
+      } else {
+        mirrored.z1 = mirror(w.z1, cz);
+        mirrored.z2 = mirror(w.z2, cz);
+      }
+      return mirrored;
+    });
+
+    const newSelected = new Set([
+      ...state.selectedTags,
+      ...newWires.map((w) => w.tag),
+    ]);
+
+    set({
+      ...pushUndo(state),
+      wires: [...state.wires, ...newWires],
+      selectedTags: newSelected,
+      nextTag: tag,
+    });
+  },
 
   // ---- Undo/Redo ----
 
