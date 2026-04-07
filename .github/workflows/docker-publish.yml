@@ -4,9 +4,15 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+
+concurrency:
+  group: docker-publish
+  cancel-in-progress: false
 
 env:
   DOCKERHUB_USERNAME: ea1fuo
+  PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
   publish:
@@ -20,6 +26,9 @@ jobs:
       - name: Read version from VERSION file
         id: version
         run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU (multi-arch emulation)
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -36,6 +45,7 @@ jobs:
           context: .
           file: frontend/Dockerfile
           push: true
+          platforms: ${{ env.PLATFORMS }}
           tags: |
             ${{ env.DOCKERHUB_USERNAME }}/antennasim-frontend:${{ steps.version.outputs.version }}
             ${{ env.DOCKERHUB_USERNAME }}/antennasim-frontend:latest
@@ -48,6 +58,7 @@ jobs:
           context: .
           file: backend/Dockerfile
           push: true
+          platforms: ${{ env.PLATFORMS }}
           tags: |
             ${{ env.DOCKERHUB_USERNAME }}/antennasim-backend:${{ steps.version.outputs.version }}
             ${{ env.DOCKERHUB_USERNAME }}/antennasim-backend:latest
@@ -60,6 +71,7 @@ jobs:
           context: ./nginx
           file: nginx/Dockerfile
           push: true
+          platforms: ${{ env.PLATFORMS }}
           tags: |
             ${{ env.DOCKERHUB_USERNAME }}/antennasim-nginx:${{ steps.version.outputs.version }}
             ${{ env.DOCKERHUB_USERNAME }}/antennasim-nginx:latest
@@ -72,8 +84,53 @@ jobs:
           context: .
           file: Dockerfile
           push: true
+          platforms: ${{ env.PLATFORMS }}
           tags: |
             ${{ env.DOCKERHUB_USERNAME }}/antennasim:${{ steps.version.outputs.version }}
             ${{ env.DOCKERHUB_USERNAME }}/antennasim:latest
           cache-from: type=gha,scope=allinone
           cache-to: type=gha,mode=max,scope=allinone
+
+      - name: Verify multi-arch manifests
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          images=(
+            "${DOCKERHUB_USERNAME}/antennasim-frontend"
+            "${DOCKERHUB_USERNAME}/antennasim-backend"
+            "${DOCKERHUB_USERNAME}/antennasim-nginx"
+            "${DOCKERHUB_USERNAME}/antennasim"
+          )
+          tags=("${VERSION}" "latest")
+
+          for image in "${images[@]}"; do
+            for tag in "${tags[@]}"; do
+              ref="${image}:${tag}"
+              echo "Inspecting ${ref}"
+              verified=0
+
+              for attempt in $(seq 1 12); do
+                if inspect_output="$(docker buildx imagetools inspect "${ref}" 2>&1)"; then
+                  echo "${inspect_output}"
+
+                  if echo "${inspect_output}" | grep -q "linux/amd64" && \
+                     echo "${inspect_output}" | grep -q "linux/arm64"; then
+                    verified=1
+                    break
+                  fi
+                fi
+
+                if [ "${attempt}" -lt 12 ]; then
+                  echo "Manifest not fully available yet for ${ref} (attempt ${attempt}/12), retrying..."
+                  sleep 10
+                fi
+              done
+
+              if [ "${verified}" -ne 1 ]; then
+                echo "ERROR: ${ref} is missing required platforms after retries"
+                exit 1
+              fi
+            done
+          done
