@@ -17,14 +17,62 @@ RUN npm run build
 # --- Stage 2: Runtime ---
 FROM python:3.12-slim
 
+ARG NEC2C_TARBALL_URL=https://github.com/KJ7LNW/nec2c/archive/55be1e0e3fe5ee9dad4ce6050711450d19c562fd.tar.gz
+ARG NEC2C_TARBALL_SHA256=35c9c8cae99d9b95c628e70047352beb458090d1d9682c8529bc7a5bcf33dcfd
+ARG NEC2C_FORCE_SOURCE_BUILD=0
+
 # Install system dependencies: nec2c, nginx, redis, supervisor
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        nec2c \
-        nginx \
-        redis-server \
-        supervisor && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    apt-get update; \
+    install_from_apt=0; \
+    if [ "${NEC2C_FORCE_SOURCE_BUILD}" = "1" ]; then \
+        echo "NEC2C_FORCE_SOURCE_BUILD=1; skipping apt package install"; \
+    elif apt-get install -y --no-install-recommends nec2c; then \
+        install_from_apt=1; \
+    fi; \
+    if [ "${install_from_apt}" -eq 1 ]; then \
+        echo "Installed nec2c from apt"; \
+    else \
+        echo "nec2c package unavailable; building from pinned source"; \
+        apt-get install -y --no-install-recommends ca-certificates curl gcc make libc6-dev; \
+        curl -fsSL "${NEC2C_TARBALL_URL}" -o /tmp/nec2c.tar.gz; \
+        echo "${NEC2C_TARBALL_SHA256}  /tmp/nec2c.tar.gz" | sha256sum -c -; \
+        mkdir -p /tmp/nec2c-src; \
+        tar -xzf /tmp/nec2c.tar.gz -C /tmp/nec2c-src --strip-components=1; \
+        if [ -x /tmp/nec2c-src/configure ]; then \
+          cd /tmp/nec2c-src; \
+          ./configure --prefix=/usr/local; \
+          make -j"$(nproc)"; \
+          make install; \
+          cd /; \
+        else \
+          cc -O2 -pipe \
+            -DPACKAGE_STRING='"nec2c-fallback"' \
+            -o /usr/local/bin/nec2c \
+            /tmp/nec2c-src/main.c \
+            /tmp/nec2c-src/calculations.c \
+            /tmp/nec2c-src/fields.c \
+            /tmp/nec2c-src/geometry.c \
+            /tmp/nec2c-src/ground.c \
+            /tmp/nec2c-src/input.c \
+            /tmp/nec2c-src/matrix.c \
+            /tmp/nec2c-src/misc.c \
+            /tmp/nec2c-src/network.c \
+            /tmp/nec2c-src/radiation.c \
+            /tmp/nec2c-src/shared.c \
+            /tmp/nec2c-src/somnec.c \
+            -lm; \
+        fi; \
+        rm -rf /tmp/nec2c.tar.gz /tmp/nec2c-src; \
+        apt-get purge -y --auto-remove gcc make libc6-dev curl; \
+    fi; \
+    apt-get install -y --no-install-recommends nginx redis-server supervisor; \
+    which nec2c; \
+    nec2c -h >/tmp/nec2c-help.txt 2>&1 || true; \
+    test -s /tmp/nec2c-help.txt; \
+    rm -f /tmp/nec2c-help.txt; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
 RUN pip install --no-cache-dir \

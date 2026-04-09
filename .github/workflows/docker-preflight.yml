@@ -1,0 +1,351 @@
+name: Docker Preflight
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - backend/Dockerfile
+      - frontend/Dockerfile
+      - nginx/Dockerfile
+      - deploy/allinone/**
+      - docker-compose.yml
+      - .github/workflows/docker-publish.yml
+      - .github/workflows/docker-preflight.yml
+      - VERSION
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - backend/Dockerfile
+      - frontend/Dockerfile
+      - nginx/Dockerfile
+      - deploy/allinone/**
+      - docker-compose.yml
+      - .github/workflows/docker-publish.yml
+      - .github/workflows/docker-preflight.yml
+      - VERSION
+  workflow_dispatch:
+
+env:
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  build-multiarch:
+    name: Multi-arch build (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: frontend
+            context: .
+            file: frontend/Dockerfile
+            scope: frontend
+          - image: backend
+            context: .
+            file: backend/Dockerfile
+            scope: backend
+          - image: nginx
+            context: ./nginx
+            file: nginx/Dockerfile
+            scope: nginx
+          - image: allinone
+            context: .
+            file: Dockerfile
+            scope: allinone
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build multi-arch image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: false
+          platforms: ${{ env.PLATFORMS }}
+          cache-from: type=gha,scope=preflight-${{ matrix.scope }}
+          cache-to: type=gha,mode=max,scope=preflight-${{ matrix.scope }}
+
+  nec2c-source-fallback:
+    name: NEC2C source fallback (${{ matrix.image }} - ${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: backend
+            file: backend/Dockerfile
+            tag: antsim-backend:fallback-amd64
+            platform: linux/amd64
+          - image: backend
+            file: backend/Dockerfile
+            tag: antsim-backend:fallback-arm64
+            platform: linux/arm64
+          - image: allinone
+            file: Dockerfile
+            tag: antsim-allinone:fallback-amd64
+            platform: linux/amd64
+          - image: allinone
+            file: Dockerfile
+            tag: antsim-allinone:fallback-arm64
+            platform: linux/arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image forcing source fallback
+        run: |
+          docker buildx build \
+            --platform "${{ matrix.platform }}" \
+            --file "${{ matrix.file }}" \
+            --build-arg NEC2C_FORCE_SOURCE_BUILD=1 \
+            --tag "${{ matrix.tag }}" \
+            --load \
+            .
+
+      - name: Verify nec2c binary in forced-fallback image
+        run: |
+          docker run --rm \
+            --platform "${{ matrix.platform }}" \
+            "${{ matrix.tag }}" \
+            sh -c 'command -v nec2c >/dev/null && test -x "$(command -v nec2c)"'
+
+  smoke-runtime:
+    name: Runtime smoke (${{ matrix.platform }})
+    needs:
+      - build-multiarch
+      - nec2c-source-fallback
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image for smoke test
+        run: |
+          docker buildx build \
+            --platform "${{ matrix.platform }}" \
+            --file backend/Dockerfile \
+            --tag antsim-backend:smoke \
+            --load \
+            .
+
+      - name: Build all-in-one image for smoke test
+        run: |
+          docker buildx build \
+            --platform "${{ matrix.platform }}" \
+            --file Dockerfile \
+            --tag antsim-allinone:smoke \
+            --load \
+            .
+
+      - name: Smoke test backend
+        run: |
+          set -euo pipefail
+
+          container="antsim-backend-smoke"
+          cleanup() {
+            docker rm -f "${container}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker run -d --rm \
+            --name "${container}" \
+            --platform "${{ matrix.platform }}" \
+            -p 18000:8000 \
+            antsim-backend:smoke
+
+          for i in $(seq 1 45); do
+            if body="$(curl -fsS http://127.0.0.1:18000/api/v1/health 2>/dev/null)"; then
+              python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d.get("status") == "ok", d; assert d.get("nec2c_available") is True, d' "${body}"
+              echo "${body}"
+              break
+            fi
+
+            if [ "${i}" -eq 45 ]; then
+              echo "Backend health endpoint did not become ready in time" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+          payload='{"wires":[{"tag":1,"segments":11,"x1":0.0,"y1":0.0,"z1":10.0,"x2":10.0,"y2":0.0,"z2":10.0,"radius":0.001}],"excitations":[{"wire_tag":1,"segment":6,"voltage_real":1.0,"voltage_imag":0.0}],"frequency":{"start_mhz":14.0,"stop_mhz":14.0,"steps":1}}'
+
+          response="$(curl -fsS \
+            -X POST http://127.0.0.1:18000/api/v1/simulate \
+            -H "content-type: application/json" \
+            -d "${payload}")"
+          python3 - "${response}" <<'PY'
+          import json
+          import math
+          import sys
+
+          data = json.loads(sys.argv[1])
+          frequency_data = data.get("frequency_data")
+          assert isinstance(frequency_data, list) and frequency_data, data
+          point = frequency_data[0]
+          impedance = point.get("impedance")
+          assert isinstance(impedance, dict), point
+
+          def finite_number(value, field):
+              if not isinstance(value, (int, float)) or not math.isfinite(value):
+                  raise AssertionError(f"{field} must be a finite number, got {value!r}")
+              return float(value)
+
+          frequency_mhz = finite_number(point.get("frequency_mhz"), "frequency_mhz")
+          swr_50 = finite_number(point.get("swr_50"), "swr_50")
+          gain_max_dbi = finite_number(point.get("gain_max_dbi"), "gain_max_dbi")
+          z_real = finite_number(impedance.get("real"), "impedance.real")
+          z_imag = finite_number(impedance.get("imag"), "impedance.imag")
+
+          if not (0.001 <= frequency_mhz <= 30000.0):
+              raise AssertionError(f"frequency_mhz out of range: {frequency_mhz}")
+          if not (0.0 < swr_50 < 1000.0):
+              raise AssertionError(f"swr_50 out of range: {swr_50}")
+          if abs(gain_max_dbi) > 200.0:
+              raise AssertionError(f"gain_max_dbi out of range: {gain_max_dbi}")
+          if abs(z_real) > 1_000_000.0 or abs(z_imag) > 1_000_000.0:
+              raise AssertionError(
+                  f"impedance magnitude unexpectedly large: real={z_real}, imag={z_imag}"
+              )
+          PY
+          echo "${response}"
+
+      - name: Smoke test all-in-one
+        run: |
+          set -euo pipefail
+
+          container="antsim-allinone-smoke"
+          cleanup() {
+            docker rm -f "${container}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker run -d --rm \
+            --name "${container}" \
+            --platform "${{ matrix.platform }}" \
+            -p 18080:80 \
+            antsim-allinone:smoke
+
+          last_body=""
+
+          # Phase 1: backend up + nec2c available (allow extra time on arm64/QEMU)
+          core_ready=0
+          for i in $(seq 1 120); do
+            if body="$(curl -sS http://127.0.0.1:18080/api/v1/health 2>/dev/null)"; then
+              last_body="${body}"
+              echo "health(core) ${i}/120: ${body}"
+              if python3 -c 'import json,sys; d=json.loads(sys.argv[1]); ok=d.get("status")=="ok" and d.get("nec2c_available") is True; sys.exit(0 if ok else 1)' "${body}" 2>/dev/null
+              then
+                core_ready=1
+                break
+              fi
+            else
+              echo "health(core) ${i}/120: not reachable yet"
+            fi
+            sleep 2
+          done
+
+          if [ "${core_ready}" -ne 1 ]; then
+            echo "All-in-one core health readiness timed out" >&2
+            [ -n "${last_body}" ] && echo "Last health payload: ${last_body}" >&2
+            echo "Container logs:" >&2
+            docker logs "${container}" 2>&1 | tail -n 200 >&2 || true
+            exit 1
+          fi
+
+          # Phase 2 (non-blocking): observe Redis connectivity.
+          # Redis improves performance (cache/rate-limiter) but the backend
+          # is designed to function when Redis is unavailable.
+          redis_ready=0
+          for i in $(seq 1 120); do
+            if body="$(curl -sS http://127.0.0.1:18080/api/v1/health 2>/dev/null)"; then
+              last_body="${body}"
+              echo "health(redis) ${i}/120: ${body}"
+              if python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d.get("redis_connected") is True else 1)' "${body}" 2>/dev/null
+              then
+                redis_ready=1
+                break
+              fi
+            else
+              echo "health(redis) ${i}/120: not reachable yet"
+            fi
+            sleep 2
+          done
+
+          if [ "${redis_ready}" -ne 1 ]; then
+            echo "WARNING: All-in-one Redis readiness timed out; continuing (Redis optional for functional smoke tests)." >&2
+            [ -n "${last_body}" ] && echo "Last health payload: ${last_body}" >&2
+            echo "Container logs (tail):" >&2
+            docker logs "${container}" 2>&1 | tail -n 120 >&2 || true
+          fi
+
+          payload='{"wires":[{"tag":1,"segments":11,"x1":0.0,"y1":0.0,"z1":10.0,"x2":10.0,"y2":0.0,"z2":10.0,"radius":0.001}],"excitations":[{"wire_tag":1,"segment":6,"voltage_real":1.0,"voltage_imag":0.0}],"frequency":{"start_mhz":14.0,"stop_mhz":14.0,"steps":1}}'
+
+          response="$(curl -fsS \
+            -X POST http://127.0.0.1:18080/api/v1/simulate \
+            -H "content-type: application/json" \
+            -d "${payload}")"
+          python3 - "${response}" <<'PY'
+          import json
+          import math
+          import sys
+
+          data = json.loads(sys.argv[1])
+          frequency_data = data.get("frequency_data")
+          assert isinstance(frequency_data, list) and frequency_data, data
+          point = frequency_data[0]
+          impedance = point.get("impedance")
+          assert isinstance(impedance, dict), point
+
+          def finite_number(value, field):
+              if not isinstance(value, (int, float)) or not math.isfinite(value):
+                  raise AssertionError(f"{field} must be a finite number, got {value!r}")
+              return float(value)
+
+          frequency_mhz = finite_number(point.get("frequency_mhz"), "frequency_mhz")
+          swr_50 = finite_number(point.get("swr_50"), "swr_50")
+          gain_max_dbi = finite_number(point.get("gain_max_dbi"), "gain_max_dbi")
+          z_real = finite_number(impedance.get("real"), "impedance.real")
+          z_imag = finite_number(impedance.get("imag"), "impedance.imag")
+
+          if not (0.001 <= frequency_mhz <= 30000.0):
+              raise AssertionError(f"frequency_mhz out of range: {frequency_mhz}")
+          if not (0.0 < swr_50 < 1000.0):
+              raise AssertionError(f"swr_50 out of range: {swr_50}")
+          if abs(gain_max_dbi) > 200.0:
+              raise AssertionError(f"gain_max_dbi out of range: {gain_max_dbi}")
+          if abs(z_real) > 1_000_000.0 or abs(z_imag) > 1_000_000.0:
+              raise AssertionError(
+                  f"impedance magnitude unexpectedly large: real={z_real}, imag={z_imag}"
+              )
+          PY
+          echo "${response}"
