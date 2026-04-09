@@ -2,10 +2,17 @@ FROM python:3.12-slim AS base
 
 ARG NEC2C_TARBALL_URL=https://github.com/KJ7LNW/nec2c/archive/55be1e0e3fe5ee9dad4ce6050711450d19c562fd.tar.gz
 ARG NEC2C_TARBALL_SHA256=35c9c8cae99d9b95c628e70047352beb458090d1d9682c8529bc7a5bcf33dcfd
+ARG NEC2C_FORCE_SOURCE_BUILD=0
 
 RUN set -eux; \
     apt-get update; \
-    if apt-get install -y --no-install-recommends nec2c; then \
+    install_from_apt=0; \
+    if [ "${NEC2C_FORCE_SOURCE_BUILD}" = "1" ]; then \
+        echo "NEC2C_FORCE_SOURCE_BUILD=1; skipping apt package install"; \
+    elif apt-get install -y --no-install-recommends nec2c; then \
+        install_from_apt=1; \
+    fi; \
+    if [ "${install_from_apt}" -eq 1 ]; then \
         echo "Installed nec2c from apt"; \
     else \
         echo "nec2c package unavailable; building from pinned source"; \

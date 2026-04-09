@@ -134,3 +134,218 @@ jobs:
               fi
             done
           done
+
+      - name: Pull and runtime verify published images
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          payload='{"wires":[{"tag":1,"segments":11,"x1":0.0,"y1":0.0,"z1":10.0,"x2":10.0,"y2":0.0,"z2":10.0,"radius":0.001}],"excitations":[{"wire_tag":1,"segment":6,"voltage_real":1.0,"voltage_imag":0.0}],"frequency":{"start_mhz":14.0,"stop_mhz":14.0,"steps":1}}'
+
+          assert_simulation_contract() {
+            python3 - "$1" <<'PY'
+          import json
+          import math
+          import sys
+
+          data = json.loads(sys.argv[1])
+          frequency_data = data.get("frequency_data")
+          assert isinstance(frequency_data, list) and frequency_data, data
+          point = frequency_data[0]
+          impedance = point.get("impedance")
+          assert isinstance(impedance, dict), point
+
+          def finite_number(value, field):
+              if not isinstance(value, (int, float)) or not math.isfinite(value):
+                  raise AssertionError(f"{field} must be a finite number, got {value!r}")
+              return float(value)
+
+          frequency_mhz = finite_number(point.get("frequency_mhz"), "frequency_mhz")
+          swr_50 = finite_number(point.get("swr_50"), "swr_50")
+          gain_max_dbi = finite_number(point.get("gain_max_dbi"), "gain_max_dbi")
+          z_real = finite_number(impedance.get("real"), "impedance.real")
+          z_imag = finite_number(impedance.get("imag"), "impedance.imag")
+
+          if not (0.001 <= frequency_mhz <= 30000.0):
+              raise AssertionError(f"frequency_mhz out of range: {frequency_mhz}")
+          if not (0.0 < swr_50 < 1000.0):
+              raise AssertionError(f"swr_50 out of range: {swr_50}")
+          if abs(gain_max_dbi) > 200.0:
+              raise AssertionError(f"gain_max_dbi out of range: {gain_max_dbi}")
+          if abs(z_real) > 1_000_000.0 or abs(z_imag) > 1_000_000.0:
+              raise AssertionError(
+                  f"impedance magnitude unexpectedly large: real={z_real}, imag={z_imag}"
+              )
+          PY
+          }
+
+          assert_health_core() {
+            python3 - "$1" <<'PY'
+          import json
+          import sys
+
+          data = json.loads(sys.argv[1])
+          assert data.get("status") == "ok", data
+          assert data.get("nec2c_available") is True, data
+          PY
+          }
+
+          images=(
+            "${DOCKERHUB_USERNAME}/antennasim-frontend"
+            "${DOCKERHUB_USERNAME}/antennasim-backend"
+            "${DOCKERHUB_USERNAME}/antennasim-nginx"
+            "${DOCKERHUB_USERNAME}/antennasim"
+          )
+
+          for platform in linux/amd64 linux/arm64; do
+            platform_slug="$(echo "${platform}" | tr '/:' '-')"
+            echo "=== Platform verification: ${platform} ==="
+
+            for image in "${images[@]}"; do
+              version_ref="${image}:${VERSION}"
+              latest_ref="${image}:latest"
+
+              docker pull --platform "${platform}" "${version_ref}"
+              docker pull --platform "${platform}" "${latest_ref}"
+
+              version_id="$(docker image inspect "${version_ref}" --format '{{.Id}}')"
+              latest_id="$(docker image inspect "${latest_ref}" --format '{{.Id}}')"
+              if [ "${version_id}" != "${latest_id}" ]; then
+                echo "ERROR: ${latest_ref} does not match ${version_ref} on ${platform}" >&2
+                echo "version_id=${version_id}" >&2
+                echo "latest_id=${latest_id}" >&2
+                exit 1
+              fi
+            done
+
+            backend_ref="${DOCKERHUB_USERNAME}/antennasim-backend:${VERSION}"
+            allinone_ref="${DOCKERHUB_USERNAME}/antennasim:${VERSION}"
+            frontend_ref="${DOCKERHUB_USERNAME}/antennasim-frontend:${VERSION}"
+            nginx_ref="${DOCKERHUB_USERNAME}/antennasim-nginx:${VERSION}"
+
+            backend_container="antsim-publish-backend-${platform_slug}"
+            allinone_container="antsim-publish-allinone-${platform_slug}"
+            frontend_container="frontend"
+            backend_stack_container="backend"
+            nginx_container="antsim-publish-nginx-${platform_slug}"
+            stack_network="antsim-publish-net-${platform_slug}"
+
+            docker rm -f "${backend_container}" "${allinone_container}" "${frontend_container}" "${backend_stack_container}" "${nginx_container}" >/dev/null 2>&1 || true
+            docker network rm "${stack_network}" >/dev/null 2>&1 || true
+
+            # Standalone backend verification
+            docker run -d --rm \
+              --name "${backend_container}" \
+              --platform "${platform}" \
+              -p 28000:8000 \
+              "${backend_ref}"
+
+            backend_ready=0
+            for i in $(seq 1 90); do
+              if body="$(curl -fsS http://127.0.0.1:28000/api/v1/health 2>/dev/null)"; then
+                if assert_health_core "${body}"; then
+                  backend_ready=1
+                  break
+                fi
+              fi
+              sleep 2
+            done
+            if [ "${backend_ready}" -ne 1 ]; then
+              echo "Backend did not become healthy on ${platform}" >&2
+              docker logs "${backend_container}" 2>&1 | tail -n 200 >&2 || true
+              exit 1
+            fi
+
+            response="$(curl -fsS \
+              -X POST http://127.0.0.1:28000/api/v1/simulate \
+              -H "content-type: application/json" \
+              -d "${payload}")"
+            assert_simulation_contract "${response}"
+            docker rm -f "${backend_container}" >/dev/null 2>&1 || true
+
+            # Standalone all-in-one verification
+            docker run -d --rm \
+              --name "${allinone_container}" \
+              --platform "${platform}" \
+              -p 28080:80 \
+              "${allinone_ref}"
+
+            allinone_ready=0
+            for i in $(seq 1 120); do
+              if body="$(curl -fsS http://127.0.0.1:28080/api/v1/health 2>/dev/null)"; then
+                if assert_health_core "${body}"; then
+                  allinone_ready=1
+                  break
+                fi
+              fi
+              sleep 2
+            done
+            if [ "${allinone_ready}" -ne 1 ]; then
+              echo "All-in-one did not become healthy on ${platform}" >&2
+              docker logs "${allinone_container}" 2>&1 | tail -n 240 >&2 || true
+              exit 1
+            fi
+
+            response="$(curl -fsS \
+              -X POST http://127.0.0.1:28080/api/v1/simulate \
+              -H "content-type: application/json" \
+              -d "${payload}")"
+            assert_simulation_contract "${response}"
+            docker rm -f "${allinone_container}" >/dev/null 2>&1 || true
+
+            # Nginx split-stack verification using published images
+            docker network create "${stack_network}"
+
+            docker run -d --rm \
+              --name "${backend_stack_container}" \
+              --platform "${platform}" \
+              --network "${stack_network}" \
+              "${backend_ref}"
+
+            docker run -d --rm \
+              --name "${frontend_container}" \
+              --platform "${platform}" \
+              --network "${stack_network}" \
+              "${frontend_ref}"
+
+            docker run -d --rm \
+              --name "${nginx_container}" \
+              --platform "${platform}" \
+              --network "${stack_network}" \
+              -p 28081:80 \
+              "${nginx_ref}"
+
+            nginx_ready=0
+            for i in $(seq 1 120); do
+              if body="$(curl -fsS http://127.0.0.1:28081/api/v1/health 2>/dev/null)"; then
+                if assert_health_core "${body}"; then
+                  nginx_ready=1
+                  break
+                fi
+              fi
+              sleep 2
+            done
+            if [ "${nginx_ready}" -ne 1 ]; then
+              echo "Nginx stack did not become healthy on ${platform}" >&2
+              docker logs "${nginx_container}" 2>&1 | tail -n 200 >&2 || true
+              docker logs "${backend_stack_container}" 2>&1 | tail -n 200 >&2 || true
+              docker logs "${frontend_container}" 2>&1 | tail -n 120 >&2 || true
+              exit 1
+            fi
+
+            page="$(curl -fsS http://127.0.0.1:28081/)"
+            if ! echo "${page}" | grep -qi "<html"; then
+              echo "ERROR: Nginx frontend response did not look like HTML on ${platform}" >&2
+              exit 1
+            fi
+
+            response="$(curl -fsS \
+              -X POST http://127.0.0.1:28081/api/v1/simulate \
+              -H "content-type: application/json" \
+              -d "${payload}")"
+            assert_simulation_contract "${response}"
+
+            docker rm -f "${nginx_container}" "${frontend_container}" "${backend_stack_container}" >/dev/null 2>&1 || true
+            docker network rm "${stack_network}" >/dev/null 2>&1 || true
+          done
