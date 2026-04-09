@@ -34,28 +34,37 @@ RUN set -eux; \
         echo "Installed nec2c from apt"; \
     else \
         echo "nec2c package unavailable; building from pinned source"; \
-        apt-get install -y --no-install-recommends ca-certificates curl gcc libc6-dev; \
+        apt-get install -y --no-install-recommends ca-certificates curl gcc make libc6-dev; \
         curl -fsSL "${NEC2C_TARBALL_URL}" -o /tmp/nec2c.tar.gz; \
         echo "${NEC2C_TARBALL_SHA256}  /tmp/nec2c.tar.gz" | sha256sum -c -; \
         mkdir -p /tmp/nec2c-src; \
         tar -xzf /tmp/nec2c.tar.gz -C /tmp/nec2c-src --strip-components=1; \
-        cc -O2 -pipe \
-          -o /usr/local/bin/nec2c \
-          /tmp/nec2c-src/main.c \
-          /tmp/nec2c-src/calculations.c \
-          /tmp/nec2c-src/fields.c \
-          /tmp/nec2c-src/geometry.c \
-          /tmp/nec2c-src/ground.c \
-          /tmp/nec2c-src/input.c \
-          /tmp/nec2c-src/matrix.c \
-          /tmp/nec2c-src/misc.c \
-          /tmp/nec2c-src/network.c \
-          /tmp/nec2c-src/radiation.c \
-          /tmp/nec2c-src/shared.c \
-          /tmp/nec2c-src/somnec.c \
-          -lm; \
+        if [ -x /tmp/nec2c-src/configure ]; then \
+          cd /tmp/nec2c-src; \
+          ./configure --prefix=/usr/local; \
+          make -j"$(nproc)"; \
+          make install; \
+          cd /; \
+        else \
+          cc -O2 -pipe \
+            -DPACKAGE_STRING='"nec2c-fallback"' \
+            -o /usr/local/bin/nec2c \
+            /tmp/nec2c-src/main.c \
+            /tmp/nec2c-src/calculations.c \
+            /tmp/nec2c-src/fields.c \
+            /tmp/nec2c-src/geometry.c \
+            /tmp/nec2c-src/ground.c \
+            /tmp/nec2c-src/input.c \
+            /tmp/nec2c-src/matrix.c \
+            /tmp/nec2c-src/misc.c \
+            /tmp/nec2c-src/network.c \
+            /tmp/nec2c-src/radiation.c \
+            /tmp/nec2c-src/shared.c \
+            /tmp/nec2c-src/somnec.c \
+            -lm; \
+        fi; \
         rm -rf /tmp/nec2c.tar.gz /tmp/nec2c-src; \
-        apt-get purge -y --auto-remove gcc libc6-dev curl; \
+        apt-get purge -y --auto-remove gcc make libc6-dev curl; \
     fi; \
     apt-get install -y --no-install-recommends nginx redis-server supervisor; \
     which nec2c; \
