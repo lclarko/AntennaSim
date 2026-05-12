@@ -307,6 +307,13 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+> **Low-power hosts (Raspberry Pi / older laptops):** prefer pulling the prebuilt multi-arch images instead of local builds:
+>
+> ```bash
+> docker compose pull
+> docker compose up -d
+> ```
+
 The production stack includes:
 - **nginx** reverse proxy on ports 80/443 with gzip, security headers, and WebSocket support
 - **Frontend** served as static files (Vite build)
@@ -329,7 +336,9 @@ The nginx config is ready for SSL. To enable:
 | CPU | 1 core | 2+ cores |
 | RAM | 512 MB | 1 GB |
 | Disk | 500 MB | 1 GB |
-| OS | Any with Docker | Linux (amd64) |
+| OS | Any with Docker | Linux (amd64, arm64) |
+
+> **Raspberry Pi support:** use a 64-bit OS (`linux/arm64`, e.g. Raspberry Pi OS 64-bit). 32-bit `arm/v7` is not supported.
 
 ---
 
